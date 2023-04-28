@@ -49,20 +49,20 @@ rcl_publisher_t time_stable_publisher;
 rcl_publisher_t thruster_values_publisher;
 
 rcl_subscription_t killswitch_subscriber;
+rcl_subscription_t setpoints_subscriber;
 
 sensor_msgs__msg__Imu imu_msg;
 std_msgs__msg__Float32 barometer_msg;
 std_msgs__msg__UInt32 time_stable_msg;
 std_msgs__msg__UInt16MultiArray thruster_values_msg;
-geometry_msgs__msg__Pose setpoint_msg;
+geometry_msgs__msg__Pose setpoints_msg;
 std_msgs__msg__Bool killswitch_msg;
 
 rclc_executor_t executor;
+rclc_executor_t killswitch_executor;
 rclc_support_t support;
 rcl_allocator_t allocator;
 rcl_node_t node;
-rcl_timer_t imu_timer;
-rcl_timer_t timer;
 
 #define RCCHECK(fn)                  \
     {                                \
@@ -89,7 +89,7 @@ void error_loop()
     }
 }
 
-// Implementation example:
+// killswitch callback
 void killswitch_subscription_callback(const void *msgin)
 {
     // Cast received message to used type
@@ -97,17 +97,18 @@ void killswitch_subscription_callback(const void *msgin)
 
     // Print received message
 
-    // Process message
-    if (killswitch_msg->data)
-    {
-        // Turn on LED
-        digitalWrite(led_pin, HIGH);
-    }
-    else
-    {
-        // Turn off LED
-        digitalWrite(led_pin, LOW);
-    }
+    digitalWrite(led_pin, killswitch_msg->data);
+
+    delay(3000);
+}
+
+// setpoint callback
+void setpoints_subscription_callback(const void *msgin)
+{
+    // Cast received message to used type
+    const geometry_msgs__msg__Pose *setpoint_msg = (const geometry_msgs__msg__Pose *)msgin;
+
+    digitalWrite(led_pin, HIGH);
 
     delay(3000);
 }
@@ -146,24 +147,26 @@ void setup_micro_ros_node()
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
         "sensors/time_stable"));
 
-    // create thruster_values publisher
-
     // create killswitch subscriber
-    const rosidl_message_type_support_t *killswitch_type_support = ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool);
+    RCCHECK(rclc_subscription_init_default(
+        &killswitch_subscriber,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
+        "actuators/killswitch"));
 
-    // Initialize reliable reliable subscriber
-    rcl_ret_t killswitch_sub_rc = rclc_subscription_init_default(
-        &killswitch_subscriber, &node,
-        killswitch_type_support, "actuators/killswitch");
-
-    // Add subscription to the executor
-    rcl_ret_t killswitch_exec_rc = rclc_executor_add_subscription(
-        &executor, &killswitch_subscriber, &killswitch_msg,
-        &killswitch_subscription_callback, ON_NEW_DATA);
+    // create setpoint subscriber
+    RCCHECK(rclc_subscription_init_default(
+        &setpoints_subscriber,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Pose),
+        "controller/setpoints"));
 
     // create executor
+    RCCHECK(rclc_executor_init(&killswitch_executor, &support.context, 1, &allocator));
     RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
-    RCCHECK(rclc_executor_add_timer(&executor, &timer));
+
+    RCCHECK(rclc_executor_add_subscription(&killswitch_executor, &killswitch_subscriber, &killswitch_msg, &killswitch_subscription_callback, ON_NEW_DATA));
+    RCCHECK(rclc_executor_add_subscription(&executor, &setpoints_subscriber, &setpoints_msg, &setpoints_subscription_callback, ON_NEW_DATA));
 }
 
 void setup_imu()
@@ -248,5 +251,7 @@ void loop()
     rcl_ret_t time_rc = rcl_publish(&time_stable_publisher, &time_stable_msg, NULL);
 
     delay(100);
+    RCSOFTCHECK(rclc_executor_spin_some(&killswitch_executor, RCL_MS_TO_NS(100)));
     RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100)));
+
 }
