@@ -45,6 +45,10 @@ MS5837 bar30;
 
 rcl_publisher_t imu_publisher;
 rcl_publisher_t barometer_publisher;
+rcl_publisher_t time_stable_publisher;
+rcl_publisher_t thruster_values_publisher;
+
+rcl_subscription_t killswitch_subscriber;
 
 sensor_msgs__msg__Imu imu_msg;
 std_msgs__msg__Float32 barometer_msg;
@@ -85,51 +89,27 @@ void error_loop()
     }
 }
 
-void imu_timer_callback(rcl_timer_t *imu_timer, int64_t last_call_time)
+// Implementation example:
+void killswitch_subscription_callback(const void *msgin)
 {
-    RCLC_UNUSED(last_call_time);
-    if (imu_timer != NULL)
+    // Cast received message to used type
+    const std_msgs__msg__Bool *killswitch_msg = (const std_msgs__msg__Bool *)msgin;
+
+    // Print received message
+
+    // Process message
+    if (killswitch_msg->data)
     {
-        // update imu message
-        imu_msg.header.stamp.sec = millis() / 1000;
-        imu_msg.header.stamp.nanosec = (millis() % 1000) * 1000000;
-
-        imu::Quaternion quat = bno.getQuat();
-        imu_msg.orientation.x = quat.x();
-        imu_msg.orientation.y = quat.y();
-        imu_msg.orientation.z = quat.z();
-        imu_msg.orientation.w = quat.w();
-
-        imu::Vector<3> lin_accel = bno.getVector(Adafruit_BNO055::VECTOR_LINEARACCEL);
-        imu_msg.linear_acceleration.x = lin_accel.x();
-        imu_msg.linear_acceleration.y = lin_accel.y();
-        imu_msg.linear_acceleration.z = lin_accel.z();
-
-        imu::Vector<3> ang_vel = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
-        imu_msg.angular_velocity.x = ang_vel.x();
-        imu_msg.angular_velocity.y = ang_vel.y();
-        imu_msg.angular_velocity.z = ang_vel.z();
-
-        // publish imu message
-        RCSOFTCHECK(rcl_publish(&imu_publisher, &imu_msg, NULL));
+        // Turn on LED
+        digitalWrite(led_pin, HIGH);
     }
-}
-
-void barometer_timer_callback(rcl_timer_t *timer, int64_t last_call_time)
-{
-    RCLC_UNUSED(last_call_time);
-    if (timer != NULL)
+    else
     {
-        // update barometer message
-        //bar30.read();
-        //barometer_msg.data = bar30.depth();
-
-        // temp data
-        barometer_msg.data += 1.1;
-
-        // publish barometer message
-        RCSOFTCHECK(rcl_publish(&barometer_publisher, &barometer_msg, NULL));
+        // Turn off LED
+        digitalWrite(led_pin, LOW);
     }
+
+    delay(3000);
 }
 
 /**
@@ -152,14 +132,6 @@ void setup_micro_ros_node()
         ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
         "sensors/imu"));
 
-    // create imu timer,
-    const unsigned int timer_timeout = 1000;
-    RCCHECK(rclc_timer_init_default(
-        &timer,
-        &support,
-        RCL_MS_TO_NS(timer_timeout),
-        imu_timer_callback));
-
     // create barometer publisher
     RCCHECK(rclc_publisher_init_default(
         &barometer_publisher,
@@ -167,64 +139,31 @@ void setup_micro_ros_node()
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
         "sensors/barometer"));
 
-    // create barometer timer,
-    RCCHECK(rclc_timer_init_default(
-        &timer,
-        &support,
-        RCL_MS_TO_NS(timer_timeout),
-        barometer_timer_callback));
+    // create time_stamp publisher
+    RCCHECK(rclc_publisher_init_default(
+        &time_stable_publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
+        "sensors/time_stable"));
+
+    // create thruster_values publisher
+
+    // create killswitch subscriber
+    const rosidl_message_type_support_t *killswitch_type_support = ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool);
+
+    // Initialize reliable reliable subscriber
+    rcl_ret_t killswitch_sub_rc = rclc_subscription_init_default(
+        &killswitch_subscriber, &node,
+        killswitch_type_support, "actuators/killswitch");
+
+    // Add subscription to the executor
+    rcl_ret_t killswitch_exec_rc = rclc_executor_add_subscription(
+        &executor, &killswitch_subscriber, &killswitch_msg,
+        &killswitch_subscription_callback, ON_NEW_DATA);
 
     // create executor
     RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
     RCCHECK(rclc_executor_add_timer(&executor, &timer));
-
-    // init imu message
-    imu_msg.header.frame_id.data = (char *)"imu";
-    imu_msg.header.frame_id.size = 3;
-    imu_msg.header.frame_id.capacity = 3;
-
-    imu_msg.header.stamp.sec = 0;
-    imu_msg.header.stamp.nanosec = 0;
-
-    imu_msg.orientation_covariance[0] = 0.01;
-    imu_msg.orientation_covariance[4] = 0.01;
-    imu_msg.orientation_covariance[8] = 0.01;
-
-    imu_msg.angular_velocity_covariance[0] = 0.01;
-    imu_msg.angular_velocity_covariance[4] = 0.01;
-    imu_msg.angular_velocity_covariance[8] = 0.01;
-
-    imu_msg.linear_acceleration_covariance[0] = 0.01;
-    imu_msg.linear_acceleration_covariance[4] = 0.01;
-    imu_msg.linear_acceleration_covariance[8] = 0.01;
-
-    imu_msg.orientation.x = 0.0;
-    imu_msg.orientation.y = 0.0;
-    imu_msg.orientation.z = 0.0;
-    imu_msg.orientation.w = 1.0;
-
-    imu_msg.angular_velocity.x = 0.0;
-    imu_msg.angular_velocity.y = 0.0;
-    imu_msg.angular_velocity.z = 0.0;
-
-    imu_msg.linear_acceleration.x = 0.0;
-    imu_msg.linear_acceleration.y = 0.0;
-    imu_msg.linear_acceleration.z = 0.0;
-
-    // init barometer message
-    barometer_msg.data = 0.0;
-
-    // init time_stable message
-    time_stable_msg.data = 0;
-
-    // init thruster_values message
-    thruster_values_msg.data.data = (uint16_t *)malloc(8 * sizeof(uint16_t));
-    thruster_values_msg.data.size = 8;
-    thruster_values_msg.data.capacity = 8;
-    for (int i = 0; i < 8; i++)
-    {
-        thruster_values_msg.data.data[i] = 0;
-    }
 }
 
 void setup_imu()
@@ -260,7 +199,7 @@ void setup()
 
     // setup imu and barometer
     setup_imu();
-    //setup_barometer();    
+    // setup_barometer();
 
     // Configure micro_ros serial transport
     set_microros_serial_transports(Serial);
@@ -275,7 +214,38 @@ void setup()
 
 void loop()
 {
-    digitalWrite(led_pin, millis() % 2000 > 1000 ? HIGH : LOW);
+    digitalWrite(led_pin, millis() % 2000 > 1000);
+
+    // update imu message
+    imu_msg.header.stamp.sec = millis() / 1000;
+    imu_msg.header.stamp.nanosec = (millis() % 1000) * 1000000;
+
+    imu::Quaternion quat = bno.getQuat();
+    imu_msg.orientation.x = quat.x();
+    imu_msg.orientation.y = quat.y();
+    imu_msg.orientation.z = quat.z();
+    imu_msg.orientation.w = quat.w();
+
+    imu::Vector<3> lin_accel = bno.getVector(Adafruit_BNO055::VECTOR_LINEARACCEL);
+    imu_msg.linear_acceleration.x = lin_accel.x();
+    imu_msg.linear_acceleration.y = lin_accel.y();
+    imu_msg.linear_acceleration.z = lin_accel.z();
+
+    imu::Vector<3> ang_vel = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
+    imu_msg.angular_velocity.x = ang_vel.x();
+    imu_msg.angular_velocity.y = ang_vel.y();
+    imu_msg.angular_velocity.z = ang_vel.z();
+
+    // update barometer message
+    barometer_msg.data += 0.1;
+
+    // update time_stable message
+    time_stable_msg.data = millis();
+
+    // publish messages
+    rcl_ret_t imu_rc = rcl_publish(&imu_publisher, &imu_msg, NULL);
+    rcl_ret_t bar_rc = rcl_publish(&barometer_publisher, &barometer_msg, NULL);
+    rcl_ret_t time_rc = rcl_publish(&time_stable_publisher, &time_stable_msg, NULL);
 
     delay(100);
     RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100)));
