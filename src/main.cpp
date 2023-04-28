@@ -27,13 +27,25 @@
 // setpoint
 #include <geometry_msgs/msg/pose.h>
 
+// bno055
+#include <SPI.h>
+#include <Adafruit_BNO055.h>
+#include <utility/imumaths.h>
+
+// bar30
+#include <MS5837.h>
+
 const uint8_t led_pin = 13;
+Adafruit_BNO055 bno = Adafruit_BNO055(55);
+MS5837 bar30;
 
 #if !defined(MICRO_ROS_TRANSPORT_ARDUINO_SERIAL)
 #error This example is only avaliable for Arduino framework with serial transport.
 #endif
 
-rcl_publisher_t publisher;
+rcl_publisher_t imu_publisher;
+rcl_publisher_t barometer_publisher;
+
 sensor_msgs__msg__Imu imu_msg;
 std_msgs__msg__Float32 barometer_msg;
 std_msgs__msg__UInt32 time_stable_msg;
@@ -45,6 +57,7 @@ rclc_executor_t executor;
 rclc_support_t support;
 rcl_allocator_t allocator;
 rcl_node_t node;
+rcl_timer_t imu_timer;
 rcl_timer_t timer;
 
 #define RCCHECK(fn)                  \
@@ -72,12 +85,33 @@ void error_loop()
     }
 }
 
-void imu_timer_callback(rcl_timer_t *timer, int64_t last_call_time)
+void imu_timer_callback(rcl_timer_t *imu_timer, int64_t last_call_time)
 {
     RCLC_UNUSED(last_call_time);
-    if (timer != NULL)
+    if (imu_timer != NULL)
     {
-        RCSOFTCHECK(rcl_publish(&publisher, &imu_msg, NULL));
+        // update imu message
+        imu_msg.header.stamp.sec = millis() / 1000;
+        imu_msg.header.stamp.nanosec = (millis() % 1000) * 1000000;
+
+        imu::Quaternion quat = bno.getQuat();
+        imu_msg.orientation.x = quat.x();
+        imu_msg.orientation.y = quat.y();
+        imu_msg.orientation.z = quat.z();
+        imu_msg.orientation.w = quat.w();
+
+        imu::Vector<3> lin_accel = bno.getVector(Adafruit_BNO055::VECTOR_LINEARACCEL);
+        imu_msg.linear_acceleration.x = lin_accel.x();
+        imu_msg.linear_acceleration.y = lin_accel.y();
+        imu_msg.linear_acceleration.z = lin_accel.z();
+
+        imu::Vector<3> ang_vel = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
+        imu_msg.angular_velocity.x = ang_vel.x();
+        imu_msg.angular_velocity.y = ang_vel.y();
+        imu_msg.angular_velocity.z = ang_vel.z();
+
+        // publish imu message
+        RCSOFTCHECK(rcl_publish(&imu_publisher, &imu_msg, NULL));
     }
 }
 
@@ -86,31 +120,21 @@ void barometer_timer_callback(rcl_timer_t *timer, int64_t last_call_time)
     RCLC_UNUSED(last_call_time);
     if (timer != NULL)
     {
-        RCSOFTCHECK(rcl_publish(&publisher, &barometer_msg, NULL));
-    }
-}
+        // update barometer message
+        //bar30.read();
+        //barometer_msg.data = bar30.depth();
 
-void time_stable_timer_callback(rcl_timer_t *timer, int64_t last_call_time)
-{
-    RCLC_UNUSED(last_call_time);
-    if (timer != NULL)
-    {
-        RCSOFTCHECK(rcl_publish(&publisher, &time_stable_msg, NULL));
-    }
-}
+        // temp data
+        barometer_msg.data += 1.1;
 
-void thruster_values_timer_callback(rcl_timer_t *timer, int64_t last_call_time)
-{
-    RCLC_UNUSED(last_call_time);
-    if (timer != NULL)
-    {
-        RCSOFTCHECK(rcl_publish(&publisher, &thruster_values_msg, NULL));
+        // publish barometer message
+        RCSOFTCHECK(rcl_publish(&barometer_publisher, &barometer_msg, NULL));
     }
 }
 
 /**
  * @brief Setup Micro-ROS and create an imu publisher
-*/
+ */
 void setup_micro_ros_node()
 {
     allocator = rcl_get_default_allocator();
@@ -123,31 +147,10 @@ void setup_micro_ros_node()
 
     // create imu publisher
     RCCHECK(rclc_publisher_init_default(
-        &publisher,
+        &imu_publisher,
         &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
         "sensors/imu"));
-    
-    // create barometer publisher
-    RCCHECK(rclc_publisher_init_default(
-        &publisher,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-        "sensors/barometer"));
-
-    // create time_stable publisher
-    RCCHECK(rclc_publisher_init_default(
-        &publisher,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt32),
-        "sensors/time_stable"));
-
-    // create thruster_values publisher
-    RCCHECK(rclc_publisher_init_default(
-        &publisher,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt16MultiArray),
-        "thruster_values"));
 
     // create imu timer,
     const unsigned int timer_timeout = 1000;
@@ -157,26 +160,19 @@ void setup_micro_ros_node()
         RCL_MS_TO_NS(timer_timeout),
         imu_timer_callback));
 
-    // create barometer timer
+    // create barometer publisher
+    RCCHECK(rclc_publisher_init_default(
+        &barometer_publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+        "sensors/barometer"));
+
+    // create barometer timer,
     RCCHECK(rclc_timer_init_default(
         &timer,
         &support,
         RCL_MS_TO_NS(timer_timeout),
         barometer_timer_callback));
-    
-    // create time_stable timer
-    RCCHECK(rclc_timer_init_default(
-        &timer,
-        &support,
-        RCL_MS_TO_NS(timer_timeout),
-        time_stable_timer_callback));
-    
-    // create thruster_values timer
-    RCCHECK(rclc_timer_init_default(
-        &timer,
-        &support,
-        RCL_MS_TO_NS(timer_timeout),
-        thruster_values_timer_callback));
 
     // create executor
     RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
@@ -225,32 +221,61 @@ void setup_micro_ros_node()
     thruster_values_msg.data.data = (uint16_t *)malloc(8 * sizeof(uint16_t));
     thruster_values_msg.data.size = 8;
     thruster_values_msg.data.capacity = 8;
-    for(int i = 0; i < 8; i++)
+    for (int i = 0; i < 8; i++)
     {
         thruster_values_msg.data.data[i] = 0;
     }
 }
 
+void setup_imu()
+{
+    // Configure BNO055
+    while (!bno.begin())
+    {
+        // Serial.print("BNO055 not detected\n");
+        delay(1000);
+    }
+
+    bno.setExtCrystalUse(true);
+}
+
+void setup_barometer()
+{
+    // Configure Bar30
+    while (!bar30.init())
+    {
+        // Serial.print("Bar30 not detected\n");
+        delay(1000);
+    }
+    bar30.setModel(MS5837::MS5837_30BA);
+    bar30.setFluidDensity(997); // kg/m^3 (freshwater, 1029 for seawater)
+}
+
 void setup()
 {
+    Serial.begin(115200);
+
     // Configure LED pin
     pinMode(led_pin, OUTPUT);
 
+    // setup imu and barometer
+    setup_imu();
+    //setup_barometer();    
+
     // Configure micro_ros serial transport
-    Serial.begin(115200);
     set_microros_serial_transports(Serial);
     delay(2000);
 
     setup_micro_ros_node();
+
+    // turn on led
+    digitalWrite(led_pin, HIGH);
+    delay(3000);
 }
 
 void loop()
 {
     digitalWrite(led_pin, millis() % 2000 > 1000 ? HIGH : LOW);
-
-    // update imu message
-    imu_msg.header.stamp.sec = millis() / 1000;
-    imu_msg.header.stamp.nanosec = (millis() % 1000) * 1000000;
 
     delay(100);
     RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100)));
